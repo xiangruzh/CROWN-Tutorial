@@ -42,14 +42,13 @@ class CROWN:
         self.lbs = [None] * len(self.seq_model)
         self.ubs = [None] * len(self.seq_model)
 
-    def sequential_backward(self, layer_id, neuron_id, sign=1):
-        # For computing the bound of x_{layer_id, neuron_id}
-        # return the lower-bounded linear approximation a_all * x + b_all
+    def sequential_backward_layer(self, layer_id, sign=1):
+        # For computing the bound of x_layer_id
+        # return the lower-bounded linear approximation A_all * x + b_all
         # sign=1 by default computes the lower bound, sign=-1 is for (the negative value of) the upper bound
-
         l = self.seq_model[layer_id]
-        a_all = l.weight.data[neuron_id, :] * sign
-        b_all = l.bias.data[neuron_id] * sign
+        A_all = l.weight.data * sign
+        b_all = l.bias.data * sign
 
         # start backward
         for backward_id in range(layer_id - 1, -1, -1):
@@ -67,20 +66,20 @@ class CROWN:
                 D_low = (D_up > 0.5).float()
 
                 # We are going to decide the choice of upper and lower bounds according to the signs of a_all
-                pos_a_all = torch.clamp(a_all, min=0)
-                neg_a_all = torch.clamp(a_all, max=0)
+                pos_A_all = torch.clamp(A_all, min=0)
+                neg_A_all = torch.clamp(A_all, max=0)
 
-                b_all = neg_a_all.dot(-pre_lb * D_up) + b_all
-                a_all = pos_a_all * D_low + neg_a_all * D_up
+                b_all = neg_A_all.matmul(-pre_lb * D_up) + b_all
+                A_all = pos_A_all * D_low + neg_A_all * D_up
 
             elif isinstance(backward_l, nn.Linear):
                 # backward for Linear layer
-                b_all = a_all.matmul(backward_l.bias.data) + b_all
-                a_all = a_all.matmul(backward_l.weight.data)
+                b_all = A_all.matmul(backward_l.bias.data) + b_all
+                A_all = A_all.matmul(backward_l.weight.data)
             else:
                 raise RuntimeError("Unsupported network structure")
 
-        return a_all, b_all
+        return A_all, b_all
 
     def crown(self):
         # clear existing bounds
@@ -98,19 +97,12 @@ class CROWN:
         for layer_id in range(1, len(self.seq_model)):
             l = self.seq_model[layer_id]
             if isinstance(l, nn.Linear):
-
                 # lower bound
-                A_lb = torch.zeros(l.out_features, self.input_width)
-                b_lb = torch.zeros(l.out_features)
-                for neuron_id in range(l.out_features):
-                    A_lb[neuron_id, :], b_lb[neuron_id] = self.sequential_backward(layer_id, neuron_id, sign=1)
+                A_lb, b_lb = self.sequential_backward_layer(layer_id, sign=1)
                 lb, _ = boundlinear(self.x_lb, self.x_ub, A_lb, b_lb)
 
                 # upper bound
-                A_ub = torch.zeros(l.out_features, self.input_width)
-                b_ub = torch.zeros(l.out_features)
-                for neuron_id in range(l.out_features):
-                    A_ub[neuron_id, :], b_ub[neuron_id] = self.sequential_backward(layer_id, neuron_id, sign=-1)
+                A_ub, b_ub = self.sequential_backward_layer(layer_id, sign=-1)
                 neg_ub, _ = boundlinear(self.x_lb, self.x_ub, A_ub, b_ub)
 
                 self.lbs[layer_id] = lb
@@ -162,19 +154,12 @@ class CROWN:
 
         # backward (the last layer)
         layer_id += 1
-        l = self.seq_model[layer_id]
         # lower bound
-        A_lb = torch.zeros(l.out_features, self.input_width)
-        b_lb = torch.zeros(l.out_features)
-        for neuron_id in range(l.out_features):
-            A_lb[neuron_id, :], b_lb[neuron_id] = self.sequential_backward(layer_id, neuron_id, sign=1)
+        A_lb, b_lb = self.sequential_backward_layer(layer_id, sign=1)
         lb, _ = boundlinear(self.x_lb, self.x_ub, A_lb, b_lb)
 
         # upper bound
-        A_ub = torch.zeros(l.out_features, self.input_width)
-        b_ub = torch.zeros(l.out_features)
-        for neuron_id in range(l.out_features):
-            A_ub[neuron_id, :], b_ub[neuron_id] = self.sequential_backward(layer_id, neuron_id, sign=-1)
+        A_ub, b_ub = self.sequential_backward_layer(layer_id, sign=-1)
         neg_ub, _ = boundlinear(self.x_lb, self.x_ub, A_ub, b_ub)
 
         self.lbs[layer_id] = lb
