@@ -43,7 +43,7 @@ class CROWN:
         self.ubs = [None] * len(self.seq_model)
 
     def sequential_backward_layer(self, layer_id, sign=1):
-        # For computing the bound of x_layer_id
+        # For computing the bound of x_{layer_id}
         # return the lower-bounded linear approximation A_all * x + b_all
         # sign=1 by default computes the lower bound, sign=-1 is for (the negative value of) the upper bound
         l = self.seq_model[layer_id]
@@ -152,7 +152,7 @@ class CROWN:
             self.lbs[layer_id] = lb
             self.ubs[layer_id] = ub
 
-        # backward (the last layer)
+        # backward (only for the last layer)
         layer_id += 1
         # lower bound
         A_lb, b_lb = self.sequential_backward_layer(layer_id, sign=1)
@@ -172,6 +172,7 @@ if __name__ == '__main__':
     model = Model()
 
     input_width = model.model[0].in_features
+    output_width = model.model[-1].out_features
 
     x = torch.rand(input_width)
     print("output: {}".format(model(x)))
@@ -181,23 +182,23 @@ if __name__ == '__main__':
 
     print("%%%%%%%%%%%%%%%%%%%%%%% My IBP %%%%%%%%%%%%%%%%%%%%%%%%%%")
     lbs, ubs = boundedmodel.IBP()
-
-    print("lower bound: {}".format(lbs[-1]))
-    print("upper bound: {}".format(ubs[-1]))
+    for j in range(output_width):
+        print('f_{j}(x_0): {l:8.4f} <= f_{j}(x_0+delta) <= {u:8.4f}'.format(
+            j=j, l=lbs[-1][j].item(), u=ubs[-1][j].item()))
     print()
 
-    print("%%%%%%%%%%%%%%%%%%%%%%% My CROWN-IBP %%%%%%%%%%%%%%%%%%%%%%%%%%")
+    print("%%%%%%%%%%%%%%%%%%%% My CROWN-IBP %%%%%%%%%%%%%%%%%%%%%%%")
     lbs, ubs = boundedmodel.crown_IBP()
-
-    print("lower bound: {}".format(lbs[-1]))
-    print("upper bound: {}".format(ubs[-1]))
+    for j in range(output_width):
+        print('f_{j}(x_0): {l:8.4f} <= f_{j}(x_0+delta) <= {u:8.4f}'.format(
+            j=j, l=lbs[-1][j].item(), u=ubs[-1][j].item()))
     print()
 
     print("%%%%%%%%%%%%%%%%%%%%%%% My CROWN %%%%%%%%%%%%%%%%%%%%%%%%")
     lbs, ubs = boundedmodel.crown()
-
-    print("lower bound: {}".format(lbs[-1]))
-    print("upper bound: {}".format(ubs[-1]))
+    for j in range(output_width):
+        print('f_{j}(x_0): {l:8.4f} <= f_{j}(x_0+delta) <= {u:8.4f}'.format(
+            j=j, l=lbs[-1][j].item(), u=ubs[-1][j].item()))
     print()
 
     print("%%%%%%%%%%%%%%%%%%%%% auto-LiRPA %%%%%%%%%%%%%%%%%%%%%%%%")
@@ -216,7 +217,7 @@ if __name__ == '__main__':
             lirpa_model.set_bound_opts({'optimize_bound_args': {'iteration': 20, 'lr_alpha': 0.1}})
         lb, ub = lirpa_model.compute_bounds(x=(image,), method=method.split()[0])
         for i in range(1):
-            for j in range(2):
+            for j in range(output_width):
                 print('f_{j}(x_0): {l:8.4f} <= f_{j}(x_0+delta) <= {u:8.4f}'.format(
                     j=j, l=lb[i][j].item(), u=ub[i][j].item()))
         print()
