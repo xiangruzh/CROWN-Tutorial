@@ -56,23 +56,23 @@ class CROWN:
             backward_l = self.seq_model[backward_id]
             if isinstance(backward_l, nn.ReLU):
                 # backward for ReLU layer
-                pre_lb = self.lbs[backward_id - 1]
-                pre_ub = self.ubs[backward_id - 1]
-                layer_width = a_all.shape[0]
-                D = torch.ones(layer_width)
-                b = torch.zeros(layer_width)
-                for i in range(layer_width):
-                    if pre_ub[i] <= 0:
-                        D[i] = 0
-                    elif pre_lb[i] < 0:
-                        # D[i, 0] = pre_ub[i] / (pre_ub[i] - pre_lb[i])  # use parallel slope
-                        if a_all[i] >= 0:
-                            D[i] = 0 if pre_lb[i] + pre_ub[i] < 0 else 1  # use adaptive slope
-                        else:
-                            D[i] = pre_ub[i] / (pre_ub[i] - pre_lb[i])
-                        b[i] = 0 if a_all[i] >= 0 else -pre_ub[i] * pre_lb[i] / (pre_ub[i] - pre_lb[i])
-                b_all = a_all.dot(b) + b_all
-                a_all = a_all * D
+
+                # stable neurons
+                pre_lb = self.lbs[backward_id - 1].clamp(max=0)
+                pre_ub = self.ubs[backward_id - 1].clamp(min=0)
+                pre_ub = torch.max(pre_ub, pre_lb + 1e-8)
+
+                # linear bounds for unstable neurons
+                D_up = pre_ub / (pre_ub - pre_lb)
+                D_low = (D_up > 0.5).float()
+
+                # We are going to decide the choice of upper and lower bounds according to the signs of a_all
+                pos_a_all = torch.clamp(a_all, min=0)
+                neg_a_all = torch.clamp(a_all, max=0)
+
+                b_all = neg_a_all.dot(-pre_lb * D_up) + b_all
+                a_all = pos_a_all * D_low + neg_a_all * D_up
+
             elif isinstance(backward_l, nn.Linear):
                 # backward for Linear layer
                 b_all = a_all.matmul(backward_l.bias.data) + b_all
@@ -185,8 +185,7 @@ class CROWN:
 
 if __name__ == '__main__':
     model = Model()
-    # torch.save(model.state_dict(), 'model.pth')
-    # model.load_state_dict(torch.load('model.pth'))
+
     input_width = model.model[0].in_features
 
     x = torch.rand(input_width)
