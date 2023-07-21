@@ -6,6 +6,7 @@ from model import Model
 from auto_LiRPA import BoundedModule, BoundedTensor
 from auto_LiRPA.perturbations import PerturbationLpNorm
 from auto_LiRPA.utils import Flatten
+from adam_optimizer import AdamClipping
 
 
 def boundlinear(in_lb, in_ub, A, b):
@@ -42,10 +43,34 @@ class CROWN:
         self.lbs = [None] * len(self.seq_model)
         self.ubs = [None] * len(self.seq_model)
 
-    def sequential_backward_layer(self, layer_id, sign=1):
+        self.alpha_by_layer = [None] * len(self.seq_model)
+        alpha_length = sum([linear_layer.out_features for linear_layer in self.seq_model[:-1]
+                            if isinstance(linear_layer, nn.Linear)])
+        self.alpha = torch.zeros(alpha_length)
+
+    def initialize_alpha(self):
+        # the initial CROWN alpha is stored in alpha_by_layer after the first iteration
+        pt = 0
+        for layer_id in range(len(self.seq_model)):
+            if isinstance(self.seq_model[layer_id], nn.ReLU):
+                layer_width = self.seq_model[layer_id - 1].out_features
+                self.alpha[pt: pt + layer_width] = self.alpha_by_layer[layer_id].clone()
+                pt += layer_width
+        self.alpha.requires_grad_()
+        pt = 0
+        for layer_id in range(len(self.seq_model)):
+            if isinstance(self.seq_model[layer_id], nn.ReLU):
+                layer_width = self.seq_model[layer_id - 1].out_features
+                self.alpha_by_layer[layer_id] = self.alpha[pt: pt + layer_width]
+                pt += layer_width
+
+    def sequential_backward_layer(self, layer_id, sign=1, optimize_alpha=False):
         # For computing the bound of x_{layer_id}
         # return the lower-bounded linear approximation A_all * x + b_all
         # sign=1 by default computes the lower bound, sign=-1 is for (the negative value of) the upper bound
+        # optimize_alpha=True: use alpha stored in self.alpha for optimization;
+        #                False: use original CROWN bound
+
         l = self.seq_model[layer_id]
         A_all = l.weight.data * sign
         b_all = l.bias.data * sign
@@ -59,11 +84,15 @@ class CROWN:
                 # stable neurons
                 pre_lb = self.lbs[backward_id - 1].clamp(max=0)
                 pre_ub = self.ubs[backward_id - 1].clamp(min=0)
-                pre_ub = torch.max(pre_ub, pre_lb + 1e-8)
+                pre_ub = torch.max(pre_ub, pre_lb + 1e-8)  # in case pre_ub = pre_lb = 0
 
                 # linear bounds for unstable neurons
                 D_up = pre_ub / (pre_ub - pre_lb)
-                D_low = (D_up > 0.5).float()
+                if optimize_alpha:
+                    D_low = self.alpha_by_layer[backward_id]
+                else:
+                    D_low = (D_up > 0.5).float()
+                    self.alpha_by_layer[backward_id] = D_low
 
                 # We are going to decide the choice of upper and lower bounds according to the signs of a_all
                 pos_A_all = torch.clamp(A_all, min=0)
@@ -107,6 +136,49 @@ class CROWN:
 
                 self.lbs[layer_id] = lb
                 self.ubs[layer_id] = -neg_ub
+
+        return self.lbs, self.ubs
+
+    def alpha_crown(self, iteration=20, lr=1e-2):
+        # clear existing bounds
+        self.lbs = [None] * len(self.seq_model)
+        self.ubs = [None] * len(self.seq_model)
+
+        # The first linear layer
+        l = self.seq_model[0]
+        A = l.weight.data
+        b = l.bias.data
+        lb, ub = boundlinear(self.x_lb, self.x_ub, A, b)
+        self.lbs[0] = lb
+        self.ubs[0] = ub
+
+        for iter in range(iteration):
+            # We use the original CROWN bounds for the first iteration
+            # to initialize alpha
+            optimize_alpha = False if iter == 0 else True
+            for layer_id in range(1, len(self.seq_model)):
+                l = self.seq_model[layer_id]
+                if isinstance(l, nn.Linear):
+                    # lower bound
+                    A_lb, b_lb = self.sequential_backward_layer(layer_id, sign=1, optimize_alpha=optimize_alpha)
+                    lb, _ = boundlinear(self.x_lb, self.x_ub, A_lb, b_lb)
+
+                    # upper bound
+                    A_ub, b_ub = self.sequential_backward_layer(layer_id, sign=-1, optimize_alpha=optimize_alpha)
+                    neg_ub, _ = boundlinear(self.x_lb, self.x_ub, A_ub, b_ub)
+
+                    self.lbs[layer_id] = lb
+                    self.ubs[layer_id] = -neg_ub
+
+            if iter == 0:
+                self.initialize_alpha()
+                opt = AdamClipping(params=[self.alpha], lr=lr)
+            else:
+                loss = torch.sum(self.lbs[-1] - self.ubs[-1])  # the greater the better
+                loss.backward()
+                opt.step(clipping=True, lower_limit=torch.zeros_like(self.alpha),
+                         upper_limit=torch.ones_like(self.alpha), sign=1)
+                opt.zero_grad(set_to_none=True)
 
         return self.lbs, self.ubs
 
@@ -196,6 +268,13 @@ if __name__ == '__main__':
 
     print("%%%%%%%%%%%%%%%%%%%%%%% My CROWN %%%%%%%%%%%%%%%%%%%%%%%%")
     lbs, ubs = boundedmodel.crown()
+    for j in range(output_width):
+        print('f_{j}(x_0): {l:8.4f} <= f_{j}(x_0+delta) <= {u:8.4f}'.format(
+            j=j, l=lbs[-1][j].item(), u=ubs[-1][j].item()))
+    print()
+
+    print("%%%%%%%%%%%%%%%%%%% My alpha-CROWN %%%%%%%%%%%%%%%%%%%%%%")
+    lbs, ubs = boundedmodel.alpha_crown(iteration=50, lr=1e-2)
     for j in range(output_width):
         print('f_{j}(x_0): {l:8.4f} <= f_{j}(x_0+delta) <= {u:8.4f}'.format(
             j=j, l=lbs[-1][j].item(), u=ubs[-1][j].item()))
