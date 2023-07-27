@@ -1,12 +1,22 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import numpy as np
-from model import Model
 from auto_LiRPA import BoundedModule, BoundedTensor
 from auto_LiRPA.perturbations import PerturbationLpNorm
-from auto_LiRPA.utils import Flatten
-from adam_optimizer import AdamClipping
+
+
+class Model(nn.Module):
+    def __init__(self):
+        super(Model, self).__init__()
+        self.model = nn.Sequential(
+            nn.Linear(2, 50),
+            nn.ReLU(),
+            nn.Linear(50, 100),
+            nn.ReLU(),
+            nn.Linear(100, 2)
+        )
+
+    def forward(self, x):
+        return self.model(x)
 
 
 if __name__ == '__main__':
