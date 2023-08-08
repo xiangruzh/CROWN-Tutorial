@@ -10,7 +10,7 @@ class Model(nn.Module):
             nn.ReLU(),
             nn.Linear(50, 100),
             nn.ReLU(),
-            # nn.Linear(100, 100),
+            # nn.Linear(10, 10),
             # nn.ReLU(),
             # nn.Linear(100, 100),
             # nn.ReLU(),

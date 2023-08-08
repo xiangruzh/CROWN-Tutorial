@@ -40,49 +40,29 @@ class CROWN:
         self.x_lb = x - torch.ones_like(x) * eps
         self.x_ub = x + torch.ones_like(x) * eps
 
-        self.model_depth = len(self.seq_model)
+        self.lbs = [None] * len(self.seq_model)
+        self.ubs = [None] * len(self.seq_model)
 
-        self.lbs = [None] * self.model_depth
-        self.ubs = [None] * self.model_depth
-
-        # define alpha
-        self.initial_alpha_by_layer = [None] * self.model_depth
-
+        self.alpha_by_layer = [None] * len(self.seq_model)
+        alpha_length = sum([linear_layer.out_features for linear_layer in self.seq_model[:-1]
+                            if isinstance(linear_layer, nn.Linear)])
+        self.alpha = torch.zeros(alpha_length)
 
     def initialize_alpha(self):
-        # the initial CROWN alpha is stored in initial_alpha_by_layer after the first iteration
-        self.alpha_by_layer = [None] * self.model_depth
-        self.alpha = [None] * self.model_depth
-        for linear_id in range(self.model_depth):
-            if isinstance(self.seq_model[linear_id], nn.Linear):
-                # define independent alpha_by_layer for each backward
-                self.alpha_by_layer[linear_id] = [None] * (linear_id + 1)
-
-                # define independent alpha for each backward
-                alpha_length = sum([linear_layer.out_features for linear_layer in self.seq_model[:linear_id]
-                                    if isinstance(linear_layer, nn.Linear)])
-                self.alpha[linear_id] = torch.zeros(alpha_length)
-
+        # the initial CROWN alpha is stored in alpha_by_layer after the first iteration
+        pt = 0
         for layer_id in range(len(self.seq_model)):
-            if isinstance(self.seq_model[layer_id], nn.Linear):
-                pt = 0
-                for backward_id in range(layer_id + 1):
-                    if isinstance(self.seq_model[backward_id], nn.ReLU):
-                        layer_width = self.seq_model[backward_id - 1].out_features
-                        self.alpha[layer_id][pt: pt + layer_width] = self.initial_alpha_by_layer[backward_id].clone()
-                        pt += layer_width
-        for alpha in self.alpha:
-            if not alpha is None:
-                alpha.requires_grad_()
-
+            if isinstance(self.seq_model[layer_id], nn.ReLU):
+                layer_width = self.seq_model[layer_id - 1].out_features
+                self.alpha[pt: pt + layer_width] = self.alpha_by_layer[layer_id].clone()
+                pt += layer_width
+        self.alpha.requires_grad_()
+        pt = 0
         for layer_id in range(len(self.seq_model)):
-            if isinstance(self.seq_model[layer_id], nn.Linear):
-                pt = 0
-                for backward_id in range(layer_id + 1):
-                    if isinstance(self.seq_model[backward_id], nn.ReLU):
-                        layer_width = self.seq_model[backward_id - 1].out_features
-                        self.alpha_by_layer[layer_id][backward_id] = self.alpha[layer_id][pt: pt + layer_width]
-                        pt += layer_width
+            if isinstance(self.seq_model[layer_id], nn.ReLU):
+                layer_width = self.seq_model[layer_id - 1].out_features
+                self.alpha_by_layer[layer_id] = self.alpha[pt: pt + layer_width]
+                pt += layer_width
 
     def sequential_backward_layer(self, layer_id, sign=1, optimize_alpha=False):
         # For computing the bound of x_{layer_id}
@@ -109,10 +89,10 @@ class CROWN:
                 # linear bounds for unstable neurons
                 D_up = pre_ub / (pre_ub - pre_lb)
                 if optimize_alpha:
-                    D_low = self.alpha_by_layer[layer_id][backward_id]
+                    D_low = self.alpha_by_layer[backward_id]
                 else:
                     D_low = (D_up > 0.5).float()
-                    self.initial_alpha_by_layer[backward_id] = D_low
+                    self.alpha_by_layer[backward_id] = D_low
 
                 # We are going to decide the choice of upper and lower bounds according to the signs of a_all
                 pos_A_all = torch.clamp(A_all, min=0)
@@ -189,25 +169,20 @@ class CROWN:
 
                     self.lbs[layer_id] = lb
                     self.ubs[layer_id] = -neg_ub
-                    
+
             if iter == 0:
                 self.initialize_alpha()
-                opt = [None] * self.model_depth
-                for layer_id in range(1, self.model_depth):
-                    if not self.alpha[layer_id] is None:
-                        opt[layer_id] = AdamClipping(params=[self.alpha[layer_id]], lr=lr)
+                opt = AdamClipping(params=[self.alpha], lr=lr)
             else:
-                for layer_id in range(1, self.model_depth):
-                    lbs, ubs = self.lbs[layer_id], self.ubs[layer_id]
-                    if lbs is None or ubs is None:
-                        continue
-                    loss = torch.sum(lbs - ubs)  # the greater the better
-                    loss.backward(retain_graph=True)
-                    opt[layer_id].step(clipping=True, lower_limit=torch.zeros_like(self.alpha[layer_id]),
-                            upper_limit=torch.ones_like(self.alpha[layer_id]), sign=1)
-                    opt[layer_id].zero_grad(set_to_none=True)
-                    # print(f"iter: {iter}, layer_id: {layer_id}, loss: {loss}")
-                # print()
+                loss = torch.sum(self.lbs[-1] - self.ubs[-1])  # the greater the better
+                loss.backward()
+                opt.step(clipping=True, lower_limit=torch.zeros_like(self.alpha),
+                         upper_limit=torch.ones_like(self.alpha), sign=1)
+                opt.zero_grad(set_to_none=True)
+
+                loss_middle = torch.sum(self.lbs[-3] - self.ubs[-3])
+                print(f"iter: {iter}, loss_middle: {loss_middle}")
+                print(f"iter: {iter}, loss: {loss}")
 
         return self.lbs, self.ubs
 
@@ -271,8 +246,7 @@ class CROWN:
 
 if __name__ == '__main__':
     model = Model()
-    # torch.save(model.state_dict(), 'model_verysimple.pth')
-    # model.load_state_dict(torch.load('model.pth'))
+    # model.load_state_dict(torch.load('model_verysimple.pth'))
 
     input_width = model.model[0].in_features
     output_width = model.model[-1].out_features
@@ -306,7 +280,7 @@ if __name__ == '__main__':
     print()
 
     print("%%%%%%%%%%%%%%%%%%% My alpha-CROWN %%%%%%%%%%%%%%%%%%%%%%")
-    lbs, ubs = boundedmodel.alpha_crown(iteration=200, lr=1e-2)
+    lbs, ubs = boundedmodel.alpha_crown(iteration=50, lr=1e-2)
     for j in range(output_width):
         print('f_{j}(x_0): {l:8.4f} <= f_{j}(x_0+delta) <= {u:8.4f}'.format(
             j=j, l=lbs[-1][j].item(), u=ubs[-1][j].item()))
@@ -314,15 +288,13 @@ if __name__ == '__main__':
 
     print("%%%%%%%%%%%%%%%%%%%%% auto-LiRPA %%%%%%%%%%%%%%%%%%%%%%%%")
     image = x.unsqueeze(0)
-    lirpa_model = BoundedModule(model, torch.empty_like(image), device=image.device,
-                                bound_opts={'sparse_intermediate_bounds': False,
-                                            'sparse_features_alpha': False})
+    lirpa_model = BoundedModule(model, torch.empty_like(image), device=image.device)
     norm = float("inf")
     ptb = PerturbationLpNorm(norm=norm, eps=eps)
     image = BoundedTensor(image, ptb)
 
     for method in [
-        'IBP', 'IBP+backward (CROWN-IBP)', 'backward (CROWN)', 'CROWN-Optimized']:
+        'IBP', 'IBP+backward (CROWN-IBP)', 'backward (CROWN)']:
         print('Bounding method:', method)
         if 'Optimized' in method:
             # For optimized bound, you can change the number of iterations, learning rate, etc here. Also you can
