@@ -55,9 +55,6 @@ class CROWN:
         self.alpha = [None] * self.model_depth
         for linear_id in range(self.model_depth):
             if isinstance(self.seq_model[linear_id], nn.Linear):
-                # define independent alpha_by_layer for each backward
-                self.alpha_by_layer[linear_id] = [None] * (linear_id + 1)
-
                 # define independent alpha for each backward
                 alpha_length = sum([linear_layer.out_features for linear_layer in self.seq_model[:linear_id]
                                     if isinstance(linear_layer, nn.Linear)])
@@ -69,20 +66,20 @@ class CROWN:
                 for backward_id in range(layer_id + 1):
                     if isinstance(self.seq_model[backward_id], nn.ReLU):
                         layer_width = self.seq_model[backward_id - 1].out_features
+                        
                         self.alpha[layer_id][pt: pt + layer_width] = self.initial_alpha_by_layer[backward_id].clone()
                         pt += layer_width
         for alpha in self.alpha:
             if not alpha is None:
                 alpha.requires_grad_()
 
-        for layer_id in range(len(self.seq_model)):
-            if isinstance(self.seq_model[layer_id], nn.Linear):
-                pt = 0
-                for backward_id in range(layer_id + 1):
-                    if isinstance(self.seq_model[backward_id], nn.ReLU):
-                        layer_width = self.seq_model[backward_id - 1].out_features
-                        self.alpha_by_layer[layer_id][backward_id] = self.alpha[layer_id][pt: pt + layer_width]
-                        pt += layer_width
+
+        pt = 0
+        for backward_id in range(self.model_depth):
+            if isinstance(self.seq_model[backward_id], nn.ReLU):
+                layer_width = self.seq_model[backward_id - 1].out_features
+                self.alpha_by_layer[backward_id] = list(range(pt, pt + layer_width))
+                pt += layer_width
 
     def sequential_backward_layer(self, layer_id, sign=1, optimize_alpha=False):
         # For computing the bound of x_{layer_id}
@@ -109,7 +106,7 @@ class CROWN:
                 # linear bounds for unstable neurons
                 D_up = pre_ub / (pre_ub - pre_lb)
                 if optimize_alpha:
-                    D_low = self.alpha_by_layer[layer_id][backward_id]
+                    D_low = self.alpha[layer_id][self.alpha_by_layer[backward_id]]
                 else:
                     D_low = (D_up > 0.5).float()
                     self.initial_alpha_by_layer[backward_id] = D_low
@@ -272,7 +269,7 @@ class CROWN:
 if __name__ == '__main__':
     model = Model()
     # torch.save(model.state_dict(), 'model_verysimple.pth')
-    # model.load_state_dict(torch.load('model.pth'))
+    model.load_state_dict(torch.load('model.pth'))
 
     input_width = model.model[0].in_features
     output_width = model.model[-1].out_features
@@ -306,7 +303,7 @@ if __name__ == '__main__':
     print()
 
     print("%%%%%%%%%%%%%%%%%%% My alpha-CROWN %%%%%%%%%%%%%%%%%%%%%%")
-    lbs, ubs = boundedmodel.alpha_crown(iteration=200, lr=1e-2)
+    lbs, ubs = boundedmodel.alpha_crown(iteration=200, lr=1e-1)
     for j in range(output_width):
         print('f_{j}(x_0): {l:8.4f} <= f_{j}(x_0+delta) <= {u:8.4f}'.format(
             j=j, l=lbs[-1][j].item(), u=ubs[-1][j].item()))
