@@ -58,17 +58,18 @@ class CROWN:
                 # define independent alpha for each backward
                 alpha_length = sum([linear_layer.out_features for linear_layer in self.seq_model[:linear_id]
                                     if isinstance(linear_layer, nn.Linear)])
-                self.alpha[linear_id] = torch.zeros(alpha_length)
+                self.alpha[linear_id] = torch.zeros(2, self.seq_model[linear_id].out_features, alpha_length)
 
         for layer_id in range(len(self.seq_model)):
             if isinstance(self.seq_model[layer_id], nn.Linear):
+                layer_width = self.seq_model[layer_id].out_features
                 pt = 0
                 for backward_id in range(layer_id + 1):
                     if isinstance(self.seq_model[backward_id], nn.ReLU):
-                        layer_width = self.seq_model[backward_id - 1].out_features
+                        backward_layer_width = self.seq_model[backward_id - 1].out_features
                         
-                        self.alpha[layer_id][pt: pt + layer_width] = self.initial_alpha_by_layer[backward_id].clone()
-                        pt += layer_width
+                        self.alpha[layer_id][:, :, pt: pt + backward_layer_width] = self.initial_alpha_by_layer[backward_id].clone().repeat(2, layer_width, 1)
+                        pt += backward_layer_width
         for alpha in self.alpha:
             if not alpha is None:
                 alpha.requires_grad_()
@@ -106,7 +107,10 @@ class CROWN:
                 # linear bounds for unstable neurons
                 D_up = pre_ub / (pre_ub - pre_lb)
                 if optimize_alpha:
-                    D_low = self.alpha[layer_id][self.alpha_by_layer[backward_id]]
+                    if sign == 1:
+                        D_low = self.alpha[layer_id][0, :, self.alpha_by_layer[backward_id]]
+                    else:
+                        D_low = self.alpha[layer_id][1, :, self.alpha_by_layer[backward_id]]
                 else:
                     D_low = (D_up > 0.5).float()
                     self.initial_alpha_by_layer[backward_id] = D_low
@@ -199,10 +203,17 @@ class CROWN:
                     if lbs is None or ubs is None:
                         continue
                     loss = torch.sum(lbs - ubs)  # the greater the better
+                    # loss = torch.sum(lbs - ubs)  # the greater the better
+                    # loss = sum(lbs)
                     loss.backward(retain_graph=True)
                     opt[layer_id].step(clipping=True, lower_limit=torch.zeros_like(self.alpha[layer_id]),
                             upper_limit=torch.ones_like(self.alpha[layer_id]), sign=1)
                     opt[layer_id].zero_grad(set_to_none=True)
+                    # loss = -sum(ubs)
+                    # loss.backward(retain_graph=True)
+                    # opt[layer_id].step(clipping=True, lower_limit=torch.zeros_like(self.alpha[layer_id]),
+                    #         upper_limit=torch.ones_like(self.alpha[layer_id]), sign=1)
+                    # opt[layer_id].zero_grad(set_to_none=True)
                     # print(f"iter: {iter}, layer_id: {layer_id}, loss: {loss}")
                 # print()
 
@@ -269,7 +280,7 @@ class CROWN:
 if __name__ == '__main__':
     model = Model()
     # torch.save(model.state_dict(), 'model_verysimple.pth')
-    model.load_state_dict(torch.load('model.pth'))
+    # model.load_state_dict(torch.load('model.pth'))
 
     input_width = model.model[0].in_features
     output_width = model.model[-1].out_features
@@ -303,7 +314,7 @@ if __name__ == '__main__':
     print()
 
     print("%%%%%%%%%%%%%%%%%%% My alpha-CROWN %%%%%%%%%%%%%%%%%%%%%%")
-    lbs, ubs = boundedmodel.alpha_crown(iteration=200, lr=1e-1)
+    lbs, ubs = boundedmodel.alpha_crown(iteration=20, lr=1e-1)
     for j in range(output_width):
         print('f_{j}(x_0): {l:8.4f} <= f_{j}(x_0+delta) <= {u:8.4f}'.format(
             j=j, l=lbs[-1][j].item(), u=ubs[-1][j].item()))
