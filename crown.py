@@ -9,6 +9,160 @@ from auto_LiRPA.utils import Flatten
 from adam_optimizer import AdamClipping
 
 
+class BoundLinear(nn.Linear):
+    def __init(self, in_features, out_features, bias=True):
+        super(BoundLinear, self).__init__(in_features, out_features, bias)
+
+    @staticmethod
+    def convert(linear_layer):
+        l = BoundLinear(linear_layer.in_features, linear_layer.out_features, linear_layer.bias is not None)
+        l.weight.data.copy_(linear_layer.weight.data)
+        l.bias.data.copy_(linear_layer.bias.data)
+        return l
+    
+    def bound_backward(self, last_uA, last_lA):
+        def _bound_oneside(last_A):
+            # propagate A to the nest layer
+            next_A = last_A.matmul(self.weight)
+            # compute the bias of this layer
+            sum_bias = last_A.matmul(self.bias)
+            return next_A, sum_bias
+        uA, ubias = _bound_oneside(last_uA)
+        lA, lbias = _bound_oneside(last_lA)
+        return uA, ubias, lA, lbias
+    
+    def interval_propagate(self, h_U, h_L):
+        weight = self.weight
+        bias = self.bias
+        # Linf norm
+        mid = (h_U + h_L) / 2.0
+        diff = (h_U - h_L) / 2.0
+        weight_abs = weight.abs()
+        center = torch.addmm(bias, mid, weight.t())
+        deviation = diff.matmul(weight_abs.t())
+        upper = center + deviation
+        lower = center - deviation
+        return upper, lower
+    
+
+class BoundReLU(nn.ReLU):
+    def __init__(self, prev_layer, inplace=False):
+        super(BoundReLU, self).__init__(inplace)
+
+    # Convert a ReLU layer to BoundReLU layer
+    # @param act_layer ReLU layer object
+    # @param prev_layer Pre-activation layer, used for get preactivation bounds
+    @staticmethod
+    def convert(act_layer, prev_layer):
+        l = BoundReLU(prev_layer, act_layer.inplace)
+        return l
+    
+    def bound_backward(self, last_uA, last_lA):
+        # lb_r and ub_r are the bounds of input (pre-activation)
+        lb_r = self.lower_l.clamp(max=0)
+        ub_r = self.upper_u.clamp(min=0)
+        # avoid division by 0 when both lb_r and ub_r are 0
+        ub_r = torch.max(ub_r, lb_r + 1e-8)
+        # CROWN upper and lower linear bounds
+        upper_d = ub_r / (ub_r - lb_r)
+        upper_b = - lb_r * upper_d
+        upper_d = upper_d.unsqueeze(1)
+        lower_d = (upper_d > 0.5).float()
+        uA = lA = None
+        ubias = lbias = 0
+        # Choose upper or lower bounds based on the sign of last_A
+        if last_uA is not None:
+            pos_uA = last_uA.clamp(min=0)
+            neg_uA = last_uA.clamp(max=0)
+            uA = upper_d * pos_uA + lower_d * neg_uA
+            mult_uA = pos_uA.view(last_uA.size(0), last_uA.size(1), -1)
+            ubias = mult_uA.matmul(upper_b.view(upper_b.size(0), -1, 1)).squeeze(-1)
+        if last_lA is not None:
+            neg_lA = last_lA.clamp(max=0)
+            pos_lA = last_lA.clamp(min=0)
+            lA = upper_d * neg_lA + lower_d * pos_lA
+            mult_lA = neg_lA.view(last_lA.size(0), last_lA.size(1), -1)
+            lbias = mult_lA.matmul(upper_b.view(upper_b.size(0), -1, 1)).squeeze(-1)
+        return uA, ubias, lA, lbias
+    
+    def interval_propagate(self, h_U, h_L):
+        # stored upper and lower bounds
+        self.upper_u = h_U
+        self.lower_l = h_L
+        return F.relu(h_U), F.relu(h_L)
+    
+
+class BoundSequential(nn.Sequential):
+    def __init__(self, *args):
+        super(BoundSequential, self).__init__(*args)
+    
+    # Convert a Pytorch model to a model with bounds
+    # @param seq_model Input pytorch model
+    # @return Converted model
+    @staticmethod
+    def convert(seq_model):
+        layers = []
+        for l in seq_model:
+            if isinstance(l, nn.Linear):
+                layers.append(BoundLinear.convert(l))
+            elif isinstance(l, nn.ReLU):
+                layers.append(BoundReLU.convert(l, layers[-1]))
+        return BoundSequential(*layers)
+    
+    # Full CROWN bounds with all intermediate layer bounds computed by CROWN
+    def full_backward_range(self, x_U=None, x_L=None, upper=True, lower=True):
+        h_U = x_U
+        h_L = x_L
+        modules = list(self._modules.values())
+        # CROWN propagation for all layers
+        for i in range(len(modules)):
+            # We only need the bounds before a ReLU layer
+            if isinstance(modules[i], BoundReLU):
+                # We set C as the weight of previous layer
+                if isinstance(modules[i-1], BoundLinear):
+                    # add a batch dimension
+                    newC = torch.eye(modules[i-1].out_features).unsqueeze(0)
+                    # Use CROWN to compute pre-activation bounds
+                    # starting from layer i-1
+                    ub, lb = self.backward_range(x_U=x_U, x_L=x_L, C=newC, upper=True, lower=True, modules=modules[:i])
+                # Set pre-activation bounds for layer i (the ReLU layer)
+                modules[i].upper_u = ub
+                modules[i].lower_l = lb
+        # Get the final layer bound
+        return self.backward_range(x_U=x_U, x_L=x_L, C=torch.eye(modules[i].out_features).unsqueeze(0), upper=upper, lower=lower)
+
+    def backward_range(self, x_U=None, x_L=None, C=None, upper=False, lower=True, modules=None):
+        # start propagation from the last layer
+        modules = list(self._modules.values()) if modules is None else modules
+        upper_A = C if upper else None
+        lower_A = C if lower else None
+        upper_sum_b = lower_sum_b = x_U.new([0])
+        for i, module in enumerate(reversed(modules)):
+            upper_A, upper_b, lower_A, lower_b = module.bound_backward(upper_A, lower_A)
+            upper_sum_b = upper_b + upper_sum_b
+            lower_sum_b = lower_b + lower_sum_b
+        # sign = +1: upper bound, sign = -1: lower bound
+        def _get_concrete_bound(A, sum_b, sign = -1):
+            if A is None:
+                return None
+            A = A.view(A.size(0), A.size(1), -1)
+            # A has shape (batch, specification_size, flattened_input_size)
+            x_ub = x_U.view(x_U.size(0), -1, 1)
+            x_lb = x_L.view(x_L.size(0), -1, 1)
+            center = (x_ub + x_lb) / 2.0
+            diff = (x_ub - x_lb) / 2.0
+            bound = A.bmm(center) + sign * A.abs().bmm(diff)
+            bound = bound.squeeze(-1) + sum_b
+            return bound
+        lb = _get_concrete_bound(lower_A, lower_sum_b, sign=-1)
+        ub = _get_concrete_bound(upper_A, upper_sum_b, sign=+1)
+        if ub is None:
+            ub = x_U.new([np.inf])
+        if lb is None:
+            lb = x_L.new([-np.inf])
+        return ub, lb
+    
+
 def boundlinear(in_lb, in_ub, A, b):
     # compute the bound of the output of a linear transformation
 
@@ -280,48 +434,57 @@ class CROWN:
 if __name__ == '__main__':
     model = Model()
     # torch.save(model.state_dict(), 'model_verysimple.pth')
-    # model.load_state_dict(torch.load('model.pth'))
+    model.load_state_dict(torch.load('model.pth'))
 
     input_width = model.model[0].in_features
     output_width = model.model[-1].out_features
 
     torch.manual_seed(14)
-    x = torch.rand(input_width)
+    x = torch.rand(input_width).unsqueeze(0)
     print("output: {}".format(model(x)))
     eps = 1
+    x_u = x + eps
+    x_l = x - eps
 
-    boundedmodel = CROWN(model, x, eps)
-
-    print("%%%%%%%%%%%%%%%%%%%%%%% My IBP %%%%%%%%%%%%%%%%%%%%%%%%%%")
-    lbs, ubs = boundedmodel.IBP()
+    boundedmodel = BoundSequential.convert(model.model)
+    ub, lb = boundedmodel.full_backward_range(x_L=x_l, x_U=x_u)
     for j in range(output_width):
         print('f_{j}(x_0): {l:8.4f} <= f_{j}(x_0+delta) <= {u:8.4f}'.format(
-            j=j, l=lbs[-1][j].item(), u=ubs[-1][j].item()))
+            j=j, l=lb[0][j].item(), u=ub[0][j].item()))
     print()
 
-    print("%%%%%%%%%%%%%%%%%%%% My CROWN-IBP %%%%%%%%%%%%%%%%%%%%%%%")
-    lbs, ubs = boundedmodel.crown_IBP()
-    for j in range(output_width):
-        print('f_{j}(x_0): {l:8.4f} <= f_{j}(x_0+delta) <= {u:8.4f}'.format(
-            j=j, l=lbs[-1][j].item(), u=ubs[-1][j].item()))
-    print()
+    # boundedmodel = CROWN(model, x, eps)
 
-    print("%%%%%%%%%%%%%%%%%%%%%%% My CROWN %%%%%%%%%%%%%%%%%%%%%%%%")
-    lbs, ubs = boundedmodel.crown()
-    for j in range(output_width):
-        print('f_{j}(x_0): {l:8.4f} <= f_{j}(x_0+delta) <= {u:8.4f}'.format(
-            j=j, l=lbs[-1][j].item(), u=ubs[-1][j].item()))
-    print()
+    # print("%%%%%%%%%%%%%%%%%%%%%%% My IBP %%%%%%%%%%%%%%%%%%%%%%%%%%")
+    # lbs, ubs = boundedmodel.IBP()
+    # for j in range(output_width):
+    #     print('f_{j}(x_0): {l:8.4f} <= f_{j}(x_0+delta) <= {u:8.4f}'.format(
+    #         j=j, l=lbs[-1][j].item(), u=ubs[-1][j].item()))
+    # print()
 
-    print("%%%%%%%%%%%%%%%%%%% My alpha-CROWN %%%%%%%%%%%%%%%%%%%%%%")
-    lbs, ubs = boundedmodel.alpha_crown(iteration=20, lr=1e-1)
-    for j in range(output_width):
-        print('f_{j}(x_0): {l:8.4f} <= f_{j}(x_0+delta) <= {u:8.4f}'.format(
-            j=j, l=lbs[-1][j].item(), u=ubs[-1][j].item()))
-    print()
+    # print("%%%%%%%%%%%%%%%%%%%% My CROWN-IBP %%%%%%%%%%%%%%%%%%%%%%%")
+    # lbs, ubs = boundedmodel.crown_IBP()
+    # for j in range(output_width):
+    #     print('f_{j}(x_0): {l:8.4f} <= f_{j}(x_0+delta) <= {u:8.4f}'.format(
+    #         j=j, l=lbs[-1][j].item(), u=ubs[-1][j].item()))
+    # print()
+
+    # print("%%%%%%%%%%%%%%%%%%%%%%% My CROWN %%%%%%%%%%%%%%%%%%%%%%%%")
+    # lbs, ubs = boundedmodel.crown()
+    # for j in range(output_width):
+    #     print('f_{j}(x_0): {l:8.4f} <= f_{j}(x_0+delta) <= {u:8.4f}'.format(
+    #         j=j, l=lbs[-1][j].item(), u=ubs[-1][j].item()))
+    # print()
+
+    # print("%%%%%%%%%%%%%%%%%%% My alpha-CROWN %%%%%%%%%%%%%%%%%%%%%%")
+    # lbs, ubs = boundedmodel.alpha_crown(iteration=20, lr=1e-1)
+    # for j in range(output_width):
+    #     print('f_{j}(x_0): {l:8.4f} <= f_{j}(x_0+delta) <= {u:8.4f}'.format(
+    #         j=j, l=lbs[-1][j].item(), u=ubs[-1][j].item()))
+    # print()
 
     print("%%%%%%%%%%%%%%%%%%%%% auto-LiRPA %%%%%%%%%%%%%%%%%%%%%%%%")
-    image = x.unsqueeze(0)
+    image = x
     lirpa_model = BoundedModule(model, torch.empty_like(image), device=image.device,
                                 bound_opts={'sparse_intermediate_bounds': False,
                                             'sparse_features_alpha': False})
