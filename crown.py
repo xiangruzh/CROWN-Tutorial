@@ -18,12 +18,41 @@ class BoundLinear(nn.Linear):
 
     @staticmethod
     def convert(linear_layer):
+        r"""Convert a nn.Linear object into a BoundLinear object
+
+        Args: 
+            linear_layer (nn.Linear): The linear layer to be converted.
+        
+        Returns:
+            l (BoundLinear): The converted layer
+        """ 
         l = BoundLinear(linear_layer.in_features, linear_layer.out_features, linear_layer.bias is not None)
         l.weight.data.copy_(linear_layer.weight.data)
         l.bias.data.copy_(linear_layer.bias.data)
         return l
     
     def bound_backward(self, last_uA, last_lA, start_node=None, optimize=False):
+        r"""Backward propagate through the linear layer.
+
+        Args:
+            last_uA (tensor): A (the coefficient matrix) that is backward-propagated to this layer
+            (from the layers after this layer). It's exclusive for computing the upper bound.
+
+            last_lA (tensor): A that is backward-propagated to this layer. It's exclusive for computing the lower bound.
+
+            start_node (int): An integer indicating the start node of this backward propagation. (It's not used in linear layer)
+
+            optimize (bool): Indicating whether we are optimizing parameters (alpha) (Not used in linear layer)
+
+        Returns:
+            uA (tensor): The new A for computing the upper bound after taking this layer into account.
+            
+            ubias (tensor): The bias (for upper bound) produced by this layer.
+            
+            lA( tensor): The new A for computing the lower bound after taking this layer into account.
+            
+            lbias (tensor): The bias (for lower bound) produced by this layer.
+        """
         def _bound_oneside(last_A):
             if last_A is None:
                 return None, 0
@@ -37,6 +66,16 @@ class BoundLinear(nn.Linear):
         return uA, ubias, lA, lbias
     
     def interval_propagate(self, h_U, h_L):
+        r"""Function for forward propagation through a BoundedLinear layer.
+        Args:
+            h_U (tensor): The upper bound of the tensor input to this layer.
+
+            h_L (tensor): The lower bound of the tensor input to this layer.
+
+        Returns:
+            upper (tensor): The upper bound of the output.
+            lower (tensor): The lower bound of the output.
+        """
         weight = self.weight
         bias = self.bias
         # Linf norm
@@ -51,24 +90,51 @@ class BoundLinear(nn.Linear):
     
 
 class BoundReLU(nn.ReLU):
-    def __init__(self, prev_layer, inplace=False):
+    def __init__(self, inplace=False):
         super(BoundReLU, self).__init__(inplace)
 
-    # Convert a ReLU layer to BoundReLU layer
-    # @param act_layer ReLU layer object
-    # @param prev_layer Pre-activation layer, used for get preactivation bounds
     @staticmethod
-    def convert(act_layer, prev_layer):
-        l = BoundReLU(prev_layer, act_layer.inplace)
+    def convert(act_layer):
+        r"""Convert a ReLU layer to BoundReLU layer
+
+        Args:
+            act_layer (nn.ReLU): The ReLU layer object to be converted.
+
+        Returns:
+            l (BoundReLU): The converted layer object.
+        """
+        l = BoundReLU(act_layer.inplace)
         return l
     
-    # Overwrite the forward function to set the shape of the node
-    # during a forward pass
     def forward(self, x):
+        r"""Overwrite the forward function to set the shape of the node
+            during a forward pass
+        """
         self.shape = x.shape
         return F.relu(x)
     
     def bound_backward(self, last_uA, last_lA, start_node=None, optimize=False):
+        r"""Backward propagate through the ReLU layer.
+
+        Args:
+            last_uA (tensor): A (the coefficient matrix) that is backward-propagated to this layer
+            (from the layers after this layer). It's exclusive for computing the upper bound.
+
+            last_lA (tensor): A that is backward-propagated to this layer. It's exclusive for computing the lower bound.
+
+            start_node (int): An integer indicating the start node of this backward propagation. It's used for selecting alphas.
+
+            optimize (bool): Indicating whether we are optimizing parameters (alpha).
+
+        Returns:
+            uA (tensor): The new A for computing the upper bound after taking this layer into account.
+            
+            ubias (tensor): The bias (for upper bound) produced by this layer.
+            
+            lA( tensor): The new A for computing the lower bound after taking this layer into account.
+            
+            lbias (tensor): The bias (for lower bound) produced by this layer.
+        """
         # lb_r and ub_r are the bounds of input (pre-activation)
         lb_r = self.lower_l.clamp(max=0)
         ub_r = self.upper_u.clamp(min=0)
@@ -79,13 +145,14 @@ class BoundReLU(nn.ReLU):
         upper_b = - lb_r * upper_d
         upper_d = upper_d.unsqueeze(1)
         if optimize:
+            # selected_alpha has shape (2, dim_of_start_node, batch_size=1, dim_of_this_node)
             selected_alpha = self.alpha[start_node]
             if last_lA is not None:
                 lb_lower_d = selected_alpha[0].permute(1, 0, 2)
             if last_uA is not None:
                 ub_lower_d = selected_alpha[1].permute(1, 0, 2)
         else:
-            lb_lower_d = ub_lower_d = (upper_d > 0.5).float()
+            lb_lower_d = ub_lower_d = (upper_d > 0.5).float()   # CROWN lower bounds
             # Save lower_d as initial alpha for optimization
             self.init_d = lb_lower_d
         uA = lA = None
@@ -112,6 +179,14 @@ class BoundReLU(nn.ReLU):
         return F.relu(h_U), F.relu(h_L)
     
     def init_opt_parameters(self, start_nodes):
+        r"""Initialize self.alpha with lower_d that are already saved at
+        self.init_d during the initial CROWN backward propagation.
+
+        Args:
+            start_nodes (list): A list of start_node, each start_node is a dictionary
+            {'idx', 'node'}. 'idx' is an integer indicating the position of the start node,
+            while 'node' is the object of the start node.
+        """
         self.alpha = OrderedDict()
         alpha_shape = self.shape
         alpha_init = self.init_d
@@ -122,6 +197,9 @@ class BoundReLU(nn.ReLU):
             self.alpha[ns].data.copy_(alpha_init.data)
     
     def clip_alpha(self):
+        r"""Clip alphas after an single update.
+        Alpha should be bewteen 0 and 1.
+        """
         for v in self.alpha.values():
             v.data = torch.clamp(v.data, 0, 1)
 
@@ -135,16 +213,44 @@ class BoundSequential(nn.Sequential):
     # @return Converted model
     @staticmethod
     def convert(seq_model):
+        r"""Convert a Pytorch model to a model with bounds.
+        Args:
+            seq_model: An nn.Sequential module.
+        
+        Returns:
+            The converted BoundSequential module.
+        """
         layers = []
         for l in seq_model:
             if isinstance(l, nn.Linear):
                 layers.append(BoundLinear.convert(l))
             elif isinstance(l, nn.ReLU):
-                layers.append(BoundReLU.convert(l, layers[-1]))
+                layers.append(BoundReLU.convert(l))
         return BoundSequential(*layers)
     
     # Full CROWN bounds with all intermediate layer bounds computed by CROWN
     def full_backward_range(self, x_U=None, x_L=None, upper=True, lower=True, optimize=False):
+        r"""A full backward propagation. We are going to sequentially compute the 
+        intermediate bounds for each linear layer followed by a ReLU layer. For each
+        intermediate bound, we call self.backward_range() to do a backward propagation 
+        starting from that layer.
+
+        Args:
+            x_U (tensor): The upper bound of x.
+
+            x_L (tensor): The lower bound of x.
+
+            upper (bool): Whether we want upper bound.
+
+            lower (bool): Whether we want lower bound.
+
+            optimize (bool): Whether we optimize alpha.
+
+        Returns:
+            ub (tensor): The upper bound of the final output.
+
+            lb (tensor): The lower bound of the final output.    
+        """
         modules = list(self._modules.values())
         # CROWN propagation for all layers
         for i in range(len(modules)):
@@ -164,6 +270,28 @@ class BoundSequential(nn.Sequential):
         return self.backward_range(x_U=x_U, x_L=x_L, C=torch.eye(modules[i].out_features).unsqueeze(0), upper=upper, lower=lower, start_node=i, optimize=optimize)
 
     def backward_range(self, x_U=None, x_L=None, C=None, upper=False, lower=True, start_node=None, optimize=False):
+        r"""The backward propagation starting from a given node. Can be used to compute intermediate bounds or the final bound.
+
+        Args:
+            x_U (tensor): The upper bound of x.
+
+            x_L (tensor): The lower bound of x.
+
+            C (tensor): The initial coefficient matrix. Can be used to represent the output constraints.
+            But we don't have any constraints here. So it's just an identity matrix.
+
+            upper (bool): Whether we want upper bound.
+
+            lower (bool): Whether we want lower bound. 
+
+            start_node (int): The start node of this propagation. It should be a linear layer.
+
+            optimize (bool): Whether we optimize parameters.
+
+        Returns:
+            ub (tensor): The upper bound of the output of start_node.
+            lb (tensor): The lower bound of the output of start_node.
+        """
         # start propagation from the last layer
         modules = list(self._modules.values()) if start_node is None else list(self._modules.values())[:start_node+1]
         upper_A = C if upper else None
@@ -195,6 +323,21 @@ class BoundSequential(nn.Sequential):
         return ub, lb
     
     def _get_optimized_bounds(self, x_U=None, x_L=None, upper=False, lower=True):
+        r"""The main function of alpha-CROWN.
+
+        Args:
+            x_U (tensor): The upper bound of x.
+
+            x_L (tensor): The lower bound of x.
+
+            upper (bool): Whether we want upper bound.
+
+            lower (bool): Whether we want lower bound. 
+
+        Returns:
+            best_ret_u (tensor): Optimized upper bound of the final output.
+            best_ret_l (tensor): Optimized lower bound of the final output.
+        """
         modules = list(self._modules.values())
         self.init_alpha(x_U=x_U, x_L=x_L)
         alphas, parameters = [], []
@@ -220,23 +363,19 @@ class BoundSequential(nn.Sequential):
                     if isinstance(node, BoundReLU):
                         new_intermediate = [node.lower_l.detach().clone(),
                                             node.upper_u.detach().clone()]
-                        best_intermediate_bounds[node_id] = new_intermediate
-            
+                        best_intermediate_bounds[node_id] = new_intermediate        
             l = lb
             if lb is not None:
                 l = torch.sum(lb)
             u = ub
             if ub is not None:
-                u = torch.sum(ub)
-            
+                u = torch.sum(ub)        
             loss_ = l if lower else -u
             loss = (-1 * loss_).sum()
-
             with torch.no_grad():
                 best_ret_l = torch.max(best_ret_l, lb)
                 best_ret_u = torch.min(best_ret_u, ub)
                 self._update_optimizable_activations(best_intermediate_bounds, best_alphas)
-
             opt.zero_grad(set_to_none=True)
             if i != iteration - 1:
                 # We do not need to update parameters in the last step since the
@@ -258,11 +397,23 @@ class BoundSequential(nn.Sequential):
                     node.upper_u.data = best_intermediate[1].data
         return best_ret_u, best_ret_l
 
-
-
-
-    
     def init_alpha(self, x_U=None, x_L=None):
+        r"""Initialize alphas and intermediate bounds for alpha-CROWN
+        Contains a full CROWN method.
+
+        Args:
+            x_U (tensor): The upper bound of x.
+
+            x_L (tensor): The lower bound of x.
+
+        Returns:
+            lb (tensor): Lower CROWN bound.
+
+            ub (tensor): Upper CROWN bound.
+
+            init_intermediate_bounds (dictionary): Intermediate bounds obtained 
+            by initial CROWN.
+        """
         # Do a forward pass to set perturbed nodes
         self(*x_U)
         # Do a CROWN to init all intermediate layer bounds and alpha
@@ -278,6 +429,19 @@ class BoundSequential(nn.Sequential):
         return lb, ub, init_intermediate_bounds
     
     def _set_alpha(self, parameters, alphas, lr):
+        r"""Collect alphas from all the ReLU layers and gather them
+        into "parameters" for optimization. Also construct best_alphas
+        to keep tracking the values of alphas.
+
+        Args:
+            parameters (list): An empty list, to gather all alphas for optimization.
+
+            alphas (list): An empty list, to gather all values of alphas.
+
+            lr (float): Learning rate, for optimization.
+
+        best_alphas (OrderDict): An OrderDict object to collect the value of alpha.
+        """
         modules = list(self._modules.values())
         for i, node in enumerate(modules):
             if isinstance(node, BoundReLU):
@@ -335,274 +499,6 @@ def _save_ret_first_time(bounds, fill_value, best_ret):
     else:
         best_ret.append(None)
     return best_bounds
-    
-
-def boundlinear(in_lb, in_ub, A, b):
-    # compute the bound of the output of a linear transformation
-
-    b = b.unsqueeze(1)
-    x_middle = ((in_ub + in_lb) / 2)
-    eps = (in_ub - x_middle)
-
-    # view x_middle and eps as matrices for multiplication
-    x_middle = x_middle.unsqueeze(1)
-    eps = eps.unsqueeze(1)
-
-    y0 = A.matmul(x_middle) + b
-    out_eps = torch.abs(A).matmul(eps)
-    out_ub = y0 + out_eps
-    out_lb = y0 - out_eps
-
-    return out_lb.squeeze(1), out_ub.squeeze(1)
-
-
-class CROWN:
-    def __init__(self, model, x, eps):
-        self.model = model
-        self.x = x
-        self.eps = eps
-
-        self.seq_model = model.model
-        self.input_width = self.seq_model[0].in_features
-
-        self.x_lb = x - torch.ones_like(x) * eps
-        self.x_ub = x + torch.ones_like(x) * eps
-
-        self.model_depth = len(self.seq_model)
-
-        self.lbs = [None] * self.model_depth
-        self.ubs = [None] * self.model_depth
-
-        # define alpha
-        self.initial_alpha_by_layer = [None] * self.model_depth
-
-
-    def initialize_alpha(self):
-        # the initial CROWN alpha is stored in initial_alpha_by_layer after the first iteration
-        self.alpha_by_layer = [None] * self.model_depth
-        self.alpha = [None] * self.model_depth
-        for linear_id in range(self.model_depth):
-            if isinstance(self.seq_model[linear_id], nn.Linear):
-                # define independent alpha for each backward
-                alpha_length = sum([linear_layer.out_features for linear_layer in self.seq_model[:linear_id]
-                                    if isinstance(linear_layer, nn.Linear)])
-                self.alpha[linear_id] = torch.zeros(2, self.seq_model[linear_id].out_features, alpha_length)
-
-        for layer_id in range(len(self.seq_model)):
-            if isinstance(self.seq_model[layer_id], nn.Linear):
-                layer_width = self.seq_model[layer_id].out_features
-                pt = 0
-                for backward_id in range(layer_id + 1):
-                    if isinstance(self.seq_model[backward_id], nn.ReLU):
-                        backward_layer_width = self.seq_model[backward_id - 1].out_features
-                        
-                        self.alpha[layer_id][:, :, pt: pt + backward_layer_width] = self.initial_alpha_by_layer[backward_id].clone().repeat(2, layer_width, 1)
-                        pt += backward_layer_width
-        for alpha in self.alpha:
-            if not alpha is None:
-                alpha.requires_grad_()
-
-
-        pt = 0
-        for backward_id in range(self.model_depth):
-            if isinstance(self.seq_model[backward_id], nn.ReLU):
-                layer_width = self.seq_model[backward_id - 1].out_features
-                self.alpha_by_layer[backward_id] = list(range(pt, pt + layer_width))
-                pt += layer_width
-
-    def sequential_backward_layer(self, layer_id, sign=1, optimize_alpha=False):
-        # For computing the bound of x_{layer_id}
-        # return the lower-bounded linear approximation A_all * x + b_all
-        # sign=1 by default computes the lower bound, sign=-1 is for (the negative value of) the upper bound
-        # optimize_alpha=True: use alpha stored in self.alpha for optimization;
-        #                False: use original CROWN bound
-
-        l = self.seq_model[layer_id]
-        A_all = l.weight.data * sign
-        b_all = l.bias.data * sign
-
-        # start backward
-        for backward_id in range(layer_id - 1, -1, -1):
-            backward_l = self.seq_model[backward_id]
-            if isinstance(backward_l, nn.ReLU):
-                # backward for ReLU layer
-
-                # stable neurons
-                pre_lb = self.lbs[backward_id - 1].clamp(max=0)
-                pre_ub = self.ubs[backward_id - 1].clamp(min=0)
-                pre_ub = torch.max(pre_ub, pre_lb + 1e-8)  # in case pre_ub = pre_lb = 0
-
-                # linear bounds for unstable neurons
-                D_up = pre_ub / (pre_ub - pre_lb)
-                if optimize_alpha:
-                    if sign == 1:
-                        D_low = self.alpha[layer_id][0, :, self.alpha_by_layer[backward_id]]
-                    else:
-                        D_low = self.alpha[layer_id][1, :, self.alpha_by_layer[backward_id]]
-                else:
-                    D_low = (D_up > 0.5).float()
-                    self.initial_alpha_by_layer[backward_id] = D_low
-
-                # We are going to decide the choice of upper and lower bounds according to the signs of a_all
-                pos_A_all = torch.clamp(A_all, min=0)
-                neg_A_all = torch.clamp(A_all, max=0)
-
-                b_all = neg_A_all.matmul(-pre_lb * D_up) + b_all
-                A_all = pos_A_all * D_low + neg_A_all * D_up
-
-            elif isinstance(backward_l, nn.Linear):
-                # backward for Linear layer
-                b_all = A_all.matmul(backward_l.bias.data) + b_all
-                A_all = A_all.matmul(backward_l.weight.data)
-            else:
-                raise RuntimeError("Unsupported network structure")
-
-        return A_all, b_all
-
-    def crown(self):
-        # clear existing bounds
-        self.lbs = [None] * len(self.seq_model)
-        self.ubs = [None] * len(self.seq_model)
-
-        # The first linear layer
-        l = self.seq_model[0]
-        A = l.weight.data
-        b = l.bias.data
-        lb, ub = boundlinear(self.x_lb, self.x_ub, A, b)
-        self.lbs[0] = lb
-        self.ubs[0] = ub
-
-        for layer_id in range(1, len(self.seq_model)):
-            l = self.seq_model[layer_id]
-            if isinstance(l, nn.Linear):
-                # lower bound
-                A_lb, b_lb = self.sequential_backward_layer(layer_id, sign=1)
-                lb, _ = boundlinear(self.x_lb, self.x_ub, A_lb, b_lb)
-
-                # upper bound
-                A_ub, b_ub = self.sequential_backward_layer(layer_id, sign=-1)
-                neg_ub, _ = boundlinear(self.x_lb, self.x_ub, A_ub, b_ub)
-
-                self.lbs[layer_id] = lb
-                self.ubs[layer_id] = -neg_ub
-
-        return self.lbs, self.ubs
-
-    def alpha_crown(self, iteration=20, lr=1e-2):
-        # clear existing bounds
-        self.lbs = [None] * len(self.seq_model)
-        self.ubs = [None] * len(self.seq_model)
-
-        # The first linear layer
-        l = self.seq_model[0]
-        A = l.weight.data
-        b = l.bias.data
-        lb, ub = boundlinear(self.x_lb, self.x_ub, A, b)
-        self.lbs[0] = lb
-        self.ubs[0] = ub
-
-        for iter in range(iteration):
-            # We use the original CROWN bounds for the first iteration
-            # to initialize alpha
-            optimize_alpha = False if iter == 0 else True
-            for layer_id in range(1, len(self.seq_model)):
-                l = self.seq_model[layer_id]
-                if isinstance(l, nn.Linear):
-                    # lower bound
-                    A_lb, b_lb = self.sequential_backward_layer(layer_id, sign=1, optimize_alpha=optimize_alpha)
-                    lb, _ = boundlinear(self.x_lb, self.x_ub, A_lb, b_lb)
-
-                    # upper bound
-                    A_ub, b_ub = self.sequential_backward_layer(layer_id, sign=-1, optimize_alpha=optimize_alpha)
-                    neg_ub, _ = boundlinear(self.x_lb, self.x_ub, A_ub, b_ub)
-
-                    self.lbs[layer_id] = lb
-                    self.ubs[layer_id] = -neg_ub
-                    
-            if iter == 0:
-                self.initialize_alpha()
-                opt = [None] * self.model_depth
-                for layer_id in range(1, self.model_depth):
-                    if not self.alpha[layer_id] is None:
-                        opt[layer_id] = AdamClipping(params=[self.alpha[layer_id]], lr=lr)
-            else:
-                for layer_id in range(1, self.model_depth):
-                    lbs, ubs = self.lbs[layer_id], self.ubs[layer_id]
-                    if lbs is None or ubs is None:
-                        continue
-                    loss = torch.sum(lbs - ubs)  # the greater the better
-                    # loss = torch.sum(lbs - ubs)  # the greater the better
-                    # loss = sum(lbs)
-                    loss.backward(retain_graph=True)
-                    opt[layer_id].step(clipping=True, lower_limit=torch.zeros_like(self.alpha[layer_id]),
-                            upper_limit=torch.ones_like(self.alpha[layer_id]), sign=1)
-                    opt[layer_id].zero_grad(set_to_none=True)
-                    # loss = -sum(ubs)
-                    # loss.backward(retain_graph=True)
-                    # opt[layer_id].step(clipping=True, lower_limit=torch.zeros_like(self.alpha[layer_id]),
-                    #         upper_limit=torch.ones_like(self.alpha[layer_id]), sign=1)
-                    # opt[layer_id].zero_grad(set_to_none=True)
-                    # print(f"iter: {iter}, layer_id: {layer_id}, loss: {loss}")
-                # print()
-
-        return self.lbs, self.ubs
-
-    def IBP(self):
-        # clear existing bounds
-        self.lbs = [None] * len(self.seq_model)
-        self.ubs = [None] * len(self.seq_model)
-
-        lb = self.x_lb
-        ub = self.x_ub
-        layer_id = 0
-        for l in self.seq_model:
-            if isinstance(l, nn.Linear):
-                lb, ub = boundlinear(lb, ub, l.weight.data, l.bias.data)
-            elif isinstance(l, nn.ReLU):
-                lb = F.relu(lb)
-                ub = F.relu(ub)
-            else:
-                raise RuntimeError("Unsupported network structure")
-            self.lbs[layer_id] = lb
-            self.ubs[layer_id] = ub
-            layer_id += 1
-
-        return self.lbs, self.ubs
-
-    def crown_IBP(self):
-        # clear existing bounds
-        self.lbs = [None] * len(self.seq_model)
-        self.ubs = [None] * len(self.seq_model)
-
-        # forward
-        lb = self.x_lb
-        ub = self.x_ub
-        for layer_id in range(len(self.seq_model) - 1):
-            l = self.seq_model[layer_id]
-            if isinstance(l, nn.Linear):
-                lb, ub = boundlinear(lb, ub, l.weight.data, l.bias.data)
-            elif isinstance(l, nn.ReLU):
-                lb = F.relu(lb)
-                ub = F.relu(ub)
-            else:
-                raise RuntimeError("Unsupported network structure")
-            self.lbs[layer_id] = lb
-            self.ubs[layer_id] = ub
-
-        # backward (only for the last layer)
-        layer_id += 1
-        # lower bound
-        A_lb, b_lb = self.sequential_backward_layer(layer_id, sign=1)
-        lb, _ = boundlinear(self.x_lb, self.x_ub, A_lb, b_lb)
-
-        # upper bound
-        A_ub, b_ub = self.sequential_backward_layer(layer_id, sign=-1)
-        neg_ub, _ = boundlinear(self.x_lb, self.x_ub, A_ub, b_ub)
-
-        self.lbs[layer_id] = lb
-        self.ubs[layer_id] = -neg_ub
-
-        return self.lbs, self.ubs
 
 
 if __name__ == '__main__':
@@ -620,6 +516,15 @@ if __name__ == '__main__':
     x_u = x + eps
     x_l = x - eps
 
+    print("%%%%%%%%%%%%%%%%%%%%%%%% CROWN %%%%%%%%%%%%%%%%%%%%%%%%%%")
+    boundedmodel = BoundSequential.convert(model.model)
+    ub, lb = boundedmodel.full_backward_range(x_U=x_u, x_L=x_l, upper=True, lower=True)
+    for j in range(output_width):
+        print('f_{j}(x_0): {l:8.4f} <= f_{j}(x_0+delta) <= {u:8.4f}'.format(
+            j=j, l=lb[0][j].item(), u=ub[0][j].item()))
+    print()
+    
+    print("%%%%%%%%%%%%%%%%%%%%% alpha-CROWN %%%%%%%%%%%%%%%%%%%%%%%")
     boundedmodel = BoundSequential.convert(model.model)
     ub, _ = boundedmodel._get_optimized_bounds(x_L=x_l, x_U=x_u, upper=True, lower=False)
     _, lb = boundedmodel._get_optimized_bounds(x_L=x_l, x_U=x_u, upper=False, lower=True)
@@ -627,36 +532,6 @@ if __name__ == '__main__':
         print('f_{j}(x_0): {l:8.4f} <= f_{j}(x_0+delta) <= {u:8.4f}'.format(
             j=j, l=lb[0][j].item(), u=ub[0][j].item()))
     print()
-
-    # boundedmodel = CROWN(model, x, eps)
-
-    # print("%%%%%%%%%%%%%%%%%%%%%%% My IBP %%%%%%%%%%%%%%%%%%%%%%%%%%")
-    # lbs, ubs = boundedmodel.IBP()
-    # for j in range(output_width):
-    #     print('f_{j}(x_0): {l:8.4f} <= f_{j}(x_0+delta) <= {u:8.4f}'.format(
-    #         j=j, l=lbs[-1][j].item(), u=ubs[-1][j].item()))
-    # print()
-
-    # print("%%%%%%%%%%%%%%%%%%%% My CROWN-IBP %%%%%%%%%%%%%%%%%%%%%%%")
-    # lbs, ubs = boundedmodel.crown_IBP()
-    # for j in range(output_width):
-    #     print('f_{j}(x_0): {l:8.4f} <= f_{j}(x_0+delta) <= {u:8.4f}'.format(
-    #         j=j, l=lbs[-1][j].item(), u=ubs[-1][j].item()))
-    # print()
-
-    # print("%%%%%%%%%%%%%%%%%%%%%%% My CROWN %%%%%%%%%%%%%%%%%%%%%%%%")
-    # lbs, ubs = boundedmodel.crown()
-    # for j in range(output_width):
-    #     print('f_{j}(x_0): {l:8.4f} <= f_{j}(x_0+delta) <= {u:8.4f}'.format(
-    #         j=j, l=lbs[-1][j].item(), u=ubs[-1][j].item()))
-    # print()
-
-    # print("%%%%%%%%%%%%%%%%%%% My alpha-CROWN %%%%%%%%%%%%%%%%%%%%%%")
-    # lbs, ubs = boundedmodel.alpha_crown(iteration=20, lr=1e-1)
-    # for j in range(output_width):
-    #     print('f_{j}(x_0): {l:8.4f} <= f_{j}(x_0+delta) <= {u:8.4f}'.format(
-    #         j=j, l=lbs[-1][j].item(), u=ubs[-1][j].item()))
-    # print()
 
     print("%%%%%%%%%%%%%%%%%%%%% auto-LiRPA %%%%%%%%%%%%%%%%%%%%%%%%")
     image = x
