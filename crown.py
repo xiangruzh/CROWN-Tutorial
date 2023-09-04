@@ -542,8 +542,7 @@ if __name__ == '__main__':
     ptb = PerturbationLpNorm(norm=norm, eps=eps)
     image = BoundedTensor(image, ptb)
 
-    for method in [
-        'IBP', 'IBP+backward (CROWN-IBP)', 'backward (CROWN)', 'CROWN-Optimized']:
+    for method in ['backward (CROWN)', 'CROWN-Optimized']:
         print('Bounding method:', method)
         if 'Optimized' in method:
             # For optimized bound, you can change the number of iterations, learning rate, etc here. Also you can
