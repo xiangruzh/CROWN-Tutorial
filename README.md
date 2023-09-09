@@ -20,7 +20,7 @@ python crown.py
 ```
 
 ## CROWN
-### the algorithm
+### The Algorithm
 1. Given an input ```x``` and an L_inf perturbation, we have the upper bound and the lower bound of the input, noted as ```x_U``` and ```x_L``` respectively. Our goal is to compute the lower (or upepr) bound for the output of the network. To do so, we construct a linear function to lower (or upper) bound the original non-linear network. (See Lemma 2.2 of [Wang, S., Zhang, H., Xu, K., Lin, X., Jana, S., Hsieh, C. J., & Kolter, J. Z. (2021). Beta-crown: Efficient bound propagation with per-neuron split constraints for neural network robustness verification. Advances in Neural Information Processing Systems, 34, 29909-29921.](https://arxiv.org/pdf/2103.06624.pdf))
 
 2. To compute a bounded relaxation of the original network, we need to bound each non-linear layer first. Here, we use two linear constraints to relax unstable ReLU neurons: a linear upper bound and a linear lower bound. (See [Lemma 2.1](https://arxiv.org/pdf/2103.06624.pdf))
