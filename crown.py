@@ -6,8 +6,6 @@ import numpy as np
 from model import Model
 from auto_LiRPA import BoundedModule, BoundedTensor
 from auto_LiRPA.perturbations import PerturbationLpNorm
-from auto_LiRPA.utils import Flatten
-from adam_optimizer import AdamClipping
 from collections import OrderedDict
 from contextlib import ExitStack
 
@@ -194,6 +192,7 @@ class BoundReLU(nn.ReLU):
             ns = start_node['idx']
             size_s = start_node['node'].out_features
             self.alpha[ns] = torch.empty([2, size_s, 1, *alpha_shape])
+            # Why 2? One for the upper bound and one for the lower bound.
             self.alpha[ns].data.copy_(alpha_init.data)
     
     def clip_alpha(self):
@@ -227,6 +226,38 @@ class BoundSequential(nn.Sequential):
             elif isinstance(l, nn.ReLU):
                 layers.append(BoundReLU.convert(l))
         return BoundSequential(*layers)
+    
+    def compute_bounds(self, x_U=None, x_L=None, upper=True, lower=True, optimize=False):
+        r"""Main function for computing bounds.
+
+        Args:
+        Args:
+            x_U (tensor): The upper bound of x.
+
+            x_L (tensor): The lower bound of x.
+
+            upper (bool): Whether we want upper bound.
+
+            lower (bool): Whether we want lower bound.
+
+            optimize (bool): Whether we optimize alpha.
+
+        Returns:
+            ub (tensor): The upper bound of the final output.
+
+            lb (tensor): The lower bound of the final output.    
+        """
+        ub = lb = None
+        if optimize:
+            # alpha-CROWN
+            if upper:
+                ub, _ = self._get_optimized_bounds(x_L=x_L, x_U=x_U, upper=True, lower=False)
+            if lower:
+                _, lb = self._get_optimized_bounds(x_L=x_L, x_U=x_U, upper=False, lower=True)
+        else:
+            # CROWN
+            ub, lb = self.full_backward_range(x_U=x_U, x_L=x_L, upper=upper, lower=lower)
+        return ub, lb
     
     # Full CROWN bounds with all intermediate layer bounds computed by CROWN
     def full_backward_range(self, x_U=None, x_L=None, upper=True, lower=True, optimize=False):
@@ -518,7 +549,7 @@ if __name__ == '__main__':
 
     print("%%%%%%%%%%%%%%%%%%%%%%%% CROWN %%%%%%%%%%%%%%%%%%%%%%%%%%")
     boundedmodel = BoundSequential.convert(model.model)
-    ub, lb = boundedmodel.full_backward_range(x_U=x_u, x_L=x_l, upper=True, lower=True)
+    ub, lb = boundedmodel.compute_bounds(x_U=x_u, x_L=x_l, upper=True, lower=True)
     for j in range(output_width):
         print('f_{j}(x_0): {l:8.4f} <= f_{j}(x_0+delta) <= {u:8.4f}'.format(
             j=j, l=lb[0][j].item(), u=ub[0][j].item()))
@@ -526,8 +557,7 @@ if __name__ == '__main__':
     
     print("%%%%%%%%%%%%%%%%%%%%% alpha-CROWN %%%%%%%%%%%%%%%%%%%%%%%")
     boundedmodel = BoundSequential.convert(model.model)
-    ub, _ = boundedmodel._get_optimized_bounds(x_L=x_l, x_U=x_u, upper=True, lower=False)
-    _, lb = boundedmodel._get_optimized_bounds(x_L=x_l, x_U=x_u, upper=False, lower=True)
+    ub, lb = boundedmodel.compute_bounds(x_U=x_u, x_L=x_l, upper=True, lower=True, optimize=True)
     for j in range(output_width):
         print('f_{j}(x_0): {l:8.4f} <= f_{j}(x_0+delta) <= {u:8.4f}'.format(
             j=j, l=lb[0][j].item(), u=ub[0][j].item()))
