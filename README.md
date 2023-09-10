@@ -47,7 +47,7 @@ When using linear relaxation on each ReLU layer, the slopes of the lower bounds 
 
 2. The first step of the algorithm is to intialize alpha with ```init_alpha()```. There, a full CROWN is run to obtain intermediate bounds and initial alpha. Alphas are saved as properties of ```BoundReLU``` objects. Since we use independent alphas for computing the bound of each intermediate or final neuron, the length of the dictionary of ```alpha``` in a ```BoundReLU``` object equals to the number of linear layers from which we do backward propagations.
 
-3. ```_set_alpha``` is for gathering ```alpha```s from every ```BoundReLU``` layers and construct a list ```parameters``` to be optimized later.
+3. ```_set_alpha()``` is for gathering ```alpha```s from every ```BoundReLU``` layers and construct a list ```parameters``` to be optimized later.
 
 4. We use the current values of ```alpha``` to compute the upper bound (or the lower bound) with CROWN in each iteration. The loss is the sum of ```ub``` or the negative of the sum of ```lb```. We use Adam optimizer to optimize alpha.
 
