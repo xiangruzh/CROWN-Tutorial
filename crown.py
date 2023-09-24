@@ -287,7 +287,6 @@ class BoundSequential(nn.Sequential):
         for i in range(len(modules)):
             # We only need the bounds before a ReLU layer
             if isinstance(modules[i], BoundReLU):
-                # We set C as the weight of previous layer
                 if isinstance(modules[i-1], BoundLinear):
                     # add a batch dimension
                     newC = torch.eye(modules[i-1].out_features).unsqueeze(0)
