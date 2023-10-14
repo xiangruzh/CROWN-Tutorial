@@ -152,7 +152,7 @@ class BoundReLU(nn.ReLU):
         else:
             lb_lower_d = ub_lower_d = (upper_d > 0.5).float()   # CROWN lower bounds
             # Save lower_d as initial alpha for optimization
-            self.init_d = lb_lower_d
+            self.init_d = lb_lower_d.squeeze(1) # No need to save the extra dimension.
         uA = lA = None
         ubias = lbias = 0
         # Choose upper or lower bounds based on the sign of last_A
@@ -191,7 +191,7 @@ class BoundReLU(nn.ReLU):
         for start_node in start_nodes:
             ns = start_node['idx']
             size_s = start_node['node'].out_features
-            self.alpha[ns] = torch.empty([2, size_s, 1, *alpha_shape])
+            self.alpha[ns] = torch.empty([2, size_s, *alpha_shape]) # The first diminsion of alpha_shape is batch size.
             # Why 2? One for the upper bound and one for the lower bound.
             self.alpha[ns].data.copy_(alpha_init.data)
     
@@ -289,7 +289,7 @@ class BoundSequential(nn.Sequential):
             if isinstance(modules[i], BoundReLU):
                 if isinstance(modules[i-1], BoundLinear):
                     # add a batch dimension
-                    newC = torch.eye(modules[i-1].out_features).unsqueeze(0)
+                    newC = torch.eye(modules[i-1].out_features).unsqueeze(0).repeat(x_U.shape[0], 1, 1)
                     # Use CROWN to compute pre-activation bounds
                     # starting from layer i-1
                     ub, lb = self.backward_range(x_U=x_U, x_L=x_L, C=newC, upper=True, lower=True, start_node=i-1, optimize=optimize)
@@ -445,7 +445,7 @@ class BoundSequential(nn.Sequential):
             by initial CROWN.
         """
         # Do a forward pass to set perturbed nodes
-        self(*x_U)
+        self(x_U)
         # Do a CROWN to init all intermediate layer bounds and alpha
         ub, lb = self.full_backward_range(x_U, x_L)
         modules = list(self._modules.values())
@@ -540,7 +540,8 @@ if __name__ == '__main__':
     output_width = model.model[-1].out_features
 
     torch.manual_seed(14)
-    x = torch.rand(input_width).unsqueeze(0)
+    batch_size = 2
+    x = torch.rand(batch_size, input_width)
     print("output: {}".format(model(x)))
     eps = 1
     x_u = x + eps
@@ -549,17 +550,19 @@ if __name__ == '__main__':
     print("%%%%%%%%%%%%%%%%%%%%%%%% CROWN %%%%%%%%%%%%%%%%%%%%%%%%%%")
     boundedmodel = BoundSequential.convert(model.model)
     ub, lb = boundedmodel.compute_bounds(x_U=x_u, x_L=x_l, upper=True, lower=True)
-    for j in range(output_width):
-        print('f_{j}(x_0): {l:8.4f} <= f_{j}(x_0+delta) <= {u:8.4f}'.format(
-            j=j, l=lb[0][j].item(), u=ub[0][j].item()))
+    for i in range(batch_size):
+        for j in range(output_width):
+            print('f_{j}(x_0): {l:8.4f} <= f_{j}(x_0+delta) <= {u:8.4f}'.format(
+                j=j, l=lb[i][j].item(), u=ub[i][j].item()))
     print()
     
     print("%%%%%%%%%%%%%%%%%%%%% alpha-CROWN %%%%%%%%%%%%%%%%%%%%%%%")
     boundedmodel = BoundSequential.convert(model.model)
     ub, lb = boundedmodel.compute_bounds(x_U=x_u, x_L=x_l, upper=True, lower=True, optimize=True)
-    for j in range(output_width):
-        print('f_{j}(x_0): {l:8.4f} <= f_{j}(x_0+delta) <= {u:8.4f}'.format(
-            j=j, l=lb[0][j].item(), u=ub[0][j].item()))
+    for i in range(batch_size):
+        for j in range(output_width):
+            print('f_{j}(x_0): {l:8.4f} <= f_{j}(x_0+delta) <= {u:8.4f}'.format(
+                j=j, l=lb[i][j].item(), u=ub[i][j].item()))
     print()
 
     print("%%%%%%%%%%%%%%%%%%%%% auto-LiRPA %%%%%%%%%%%%%%%%%%%%%%%%")
@@ -578,7 +581,7 @@ if __name__ == '__main__':
             # increase verbosity to see per-iteration loss values.
             lirpa_model.set_bound_opts({'optimize_bound_args': {'iteration': 20, 'lr_alpha': 0.1}})
         lb, ub = lirpa_model.compute_bounds(x=(image,), method=method.split()[0])
-        for i in range(1):
+        for i in range(batch_size):
             for j in range(output_width):
                 print('f_{j}(x_0): {l:8.4f} <= f_{j}(x_0+delta) <= {u:8.4f}'.format(
                     j=j, l=lb[i][j].item(), u=ub[i][j].item()))
