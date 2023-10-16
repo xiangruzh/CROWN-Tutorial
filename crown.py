@@ -552,8 +552,9 @@ if __name__ == '__main__':
     ub, lb = boundedmodel.compute_bounds(x_U=x_u, x_L=x_l, upper=True, lower=True)
     for i in range(batch_size):
         for j in range(output_width):
-            print('f_{j}(x_0): {l:8.4f} <= f_{j}(x_0+delta) <= {u:8.4f}'.format(
-                j=j, l=lb[i][j].item(), u=ub[i][j].item()))
+            print('f_{j}(x_{i}): {l:8.4f} <= f_{j}(x_{i}+delta) <= {u:8.4f}'.format(
+                j=j, i=i, l=lb[i][j].item(), u=ub[i][j].item()))
+        print('---------------------------------------------------------')
     print()
     
     print("%%%%%%%%%%%%%%%%%%%%% alpha-CROWN %%%%%%%%%%%%%%%%%%%%%%%")
@@ -561,8 +562,9 @@ if __name__ == '__main__':
     ub, lb = boundedmodel.compute_bounds(x_U=x_u, x_L=x_l, upper=True, lower=True, optimize=True)
     for i in range(batch_size):
         for j in range(output_width):
-            print('f_{j}(x_0): {l:8.4f} <= f_{j}(x_0+delta) <= {u:8.4f}'.format(
-                j=j, l=lb[i][j].item(), u=ub[i][j].item()))
+            print('f_{j}(x_{i}): {l:8.4f} <= f_{j}(x_{i}+delta) <= {u:8.4f}'.format(
+                j=j, i=i, l=lb[i][j].item(), u=ub[i][j].item()))
+        print('---------------------------------------------------------')
     print()
 
     print("%%%%%%%%%%%%%%%%%%%%% auto-LiRPA %%%%%%%%%%%%%%%%%%%%%%%%")
@@ -583,6 +585,7 @@ if __name__ == '__main__':
         lb, ub = lirpa_model.compute_bounds(x=(image,), method=method.split()[0])
         for i in range(batch_size):
             for j in range(output_width):
-                print('f_{j}(x_0): {l:8.4f} <= f_{j}(x_0+delta) <= {u:8.4f}'.format(
-                    j=j, l=lb[i][j].item(), u=ub[i][j].item()))
+                print('f_{j}(x_{i}): {l:8.4f} <= f_{j}(x_{i}+delta) <= {u:8.4f}'.format(
+                    j=j, i=i, l=lb[i][j].item(), u=ub[i][j].item()))
+            print('---------------------------------------------------------')
         print()
