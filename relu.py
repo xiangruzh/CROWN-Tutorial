@@ -108,7 +108,7 @@ class BoundReLU(nn.ReLU):
         for start_node in start_nodes:
             ns = start_node['idx']
             size_s = start_node['node'].out_features
-            self.alpha[ns] = torch.empty([2, size_s, *alpha_shape]) # The first diminsion of alpha_shape is batch size.
+            self.alpha[ns] = torch.empty([2, size_s, *alpha_shape]).to(alpha_init) # The first diminsion of alpha_shape is batch size.
             # Why 2? One for the upper bound and one for the lower bound.
             self.alpha[ns].data.copy_(alpha_init.data)
     

@@ -98,7 +98,7 @@ class BoundSequential(nn.Sequential):
             if isinstance(modules[i], BoundReLU):
                 if isinstance(modules[i-1], BoundLinear):
                     # add a batch dimension
-                    newC = torch.eye(modules[i-1].out_features).unsqueeze(0).repeat(x_U.shape[0], 1, 1)
+                    newC = torch.eye(modules[i-1].out_features).unsqueeze(0).repeat(x_U.shape[0], 1, 1).to(x_U)
                     # Use CROWN to compute pre-activation bounds
                     # starting from layer i-1
                     ub, lb = self.backward_range(x_U=x_U, x_L=x_L, C=newC, upper=True, lower=True, start_node=i-1, optimize=optimize)
@@ -106,7 +106,7 @@ class BoundSequential(nn.Sequential):
                 modules[i].upper_u = ub
                 modules[i].lower_l = lb
         # Get the final layer bound
-        return self.backward_range(x_U=x_U, x_L=x_L, C=torch.eye(modules[i].out_features).unsqueeze(0), upper=upper, lower=lower, start_node=i, optimize=optimize)
+        return self.backward_range(x_U=x_U, x_L=x_L, C=torch.eye(modules[i].out_features).unsqueeze(0).to(x_U), upper=upper, lower=lower, start_node=i, optimize=optimize)
 
     def backward_range(self, x_U=None, x_L=None, C=None, upper=False, lower=True, start_node=None, optimize=False):
         r"""The backward propagation starting from a given node. Can be used to compute intermediate bounds or the final bound.
@@ -341,7 +341,10 @@ def _save_ret_first_time(bounds, fill_value, best_ret):
 
 
 if __name__ == '__main__':
-    model = Model()
+    device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+    print("device: {}".format(device))
+
+    model = Model().to(device)
     # torch.save(model.state_dict(), 'model_verysimple.pth')
     # model.load_state_dict(torch.load('model.pth'))
 
@@ -350,7 +353,7 @@ if __name__ == '__main__':
 
     torch.manual_seed(14)
     batch_size = 2
-    x = torch.rand(batch_size, input_width)
+    x = torch.rand(batch_size, input_width).to(device)
     print("output: {}".format(model(x)))
     eps = 1
     x_u = x + eps

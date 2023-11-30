@@ -18,7 +18,9 @@ class BoundLinear(nn.Linear):
         """ 
         l = BoundLinear(linear_layer.in_features, linear_layer.out_features, linear_layer.bias is not None)
         l.weight.data.copy_(linear_layer.weight.data)
+        l.weight.data = l.weight.data.to(linear_layer.weight.device)
         l.bias.data.copy_(linear_layer.bias.data)
+        l.bias.data = l.bias.to(linear_layer.bias.device)
         return l
     
     def bound_backward(self, last_uA, last_lA, start_node=None, optimize=False):
