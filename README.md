@@ -8,6 +8,12 @@ To check the correctness of the bounds computed by this implementation, you need
 #### ```crown.py```
 A simple implementation of CROWN and alpha-CROWN to compute bounds of fully connected sequential ReLU networks. It also uses the library ```auto_LiRPA``` to compute the bounds of the same models for comparison.
 
+#### ```linear.py```
+The definition of class ```BoundLinear```, including its interval propagation and backward propagation.
+
+#### ```relu.py```
+The definition of class ```BoundReLU```, including its interval propagation and backward propagation (with or without optimization).
+
 #### ```model.py```
 The definition of a PyTorch model. All the layers in the model is gathered in an ```nn.Sequential``` object.
 
